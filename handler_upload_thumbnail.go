@@ -1,10 +1,15 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -49,10 +54,13 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusBadRequest, "Missing Content-Type for thumbnail", nil)
 		return
 	}
-
-	data, err := io.ReadAll(file)
+	mimeType, _, err := mime.ParseMediaType(mediaType)
 	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Error reading file", err)
+		respondWithError(w, http.StatusBadRequest, "Unable to parse media type", err)
+		return
+	}
+	if mimeType != "image/jpeg" && mimeType != "image/png" {
+		respondWithError(w, http.StatusBadRequest, "Unsupported media type", nil)
 		return
 	}
 
@@ -65,9 +73,35 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusUnauthorized, "Not authorized to update this video", nil)
 		return
 	}
+	fileType := strings.Split(mediaType, "/")
+	if len(fileType) != 2 || fileType[0] != "image" {
+		respondWithError(w, http.StatusBadRequest, "Unsupported file type", nil)
+		return
+	}
 
-	thumbnailString := base64.StdEncoding.EncodeToString(data)
-	dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, thumbnailString)
+	saveToFileName := make([]byte, 32)
+	_, err = rand.Read(saveToFileName)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Couldn't generate random string", err)
+		return
+	}
+	encodedFileName := base64.RawURLEncoding.EncodeToString(saveToFileName)
+
+	//mediaType is apparently a string in the format of "type/format" ie: "image/png"
+	fileName := fmt.Sprintf("%s.%s", encodedFileName, fileType[1])
+	fullPath := filepath.Join(cfg.assetsRoot, fileName)
+	filePointer, err := os.Create(fullPath)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error creating file", err)
+		return
+	}
+	defer filePointer.Close()
+	_, err = io.Copy(filePointer, file)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Error copying file", err)
+		return
+	}
+	dataURL := fmt.Sprintf("http://localhost:%v/assets/%v", cfg.port, fileName)
 
 	video.ThumbnailURL = &dataURL
 
