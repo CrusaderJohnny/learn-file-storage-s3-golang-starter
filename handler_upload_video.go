@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"os"
+	"os/exec"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -70,6 +74,18 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusBadRequest, "issue copying video to temporary upload location", err)
 		return
 	}
+	aspectRatio, err := getVideoAspectRatio(tempFile.Name())
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "issue getting video aspect ratio", err)
+		return
+	}
+	aspectFormat := "other"
+	if aspectRatio == "16:9" {
+		aspectFormat = "landscape"
+	}
+	if aspectRatio == "9:16" {
+		aspectFormat = "portrait"
+	}
 	_, err = tempFile.Seek(0, io.SeekStart)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "issue resetting pointer to beginning", err)
@@ -81,7 +97,7 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		respondWithError(w, http.StatusBadRequest, "issue generating random filename", err)
 		return
 	}
-	key := hex.EncodeToString(saveName) + ".mp4"
+	key := aspectFormat + "/" + hex.EncodeToString(saveName) + ".mp4"
 
 	_, err = cfg.s3Client.PutObject(r.Context(), &s3.PutObjectInput{
 		Bucket:      aws.String(cfg.s3Bucket),
@@ -102,4 +118,37 @@ func (cfg *apiConfig) handlerUploadVideo(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	respondWithJSON(w, http.StatusOK, video)
+}
+
+func getVideoAspectRatio(filePath string) (string, error) {
+	cmd := exec.Command("ffprobe", "-v", "error", "-print_format", "json", "-show_streams", filePath)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
+	type aspectRatio struct {
+		Streams []struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		}
+	}
+	returnedRatios := aspectRatio{}
+	err = json.Unmarshal(stdout.Bytes(), &returnedRatios)
+	if err != nil {
+		return "", err
+	}
+	if len(returnedRatios.Streams) == 0 {
+		return "", errors.New("no aspect ratios found")
+	}
+	ratio := float64(returnedRatios.Streams[0].Width) / float64(returnedRatios.Streams[0].Height)
+	roundedRatio := math.Round(ratio*100) / 100
+	if roundedRatio == 1.78 {
+		return "16:9", nil
+	}
+	if roundedRatio == 0.56 {
+		return "9:16", nil
+	}
+	return "other", nil
 }
